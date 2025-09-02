@@ -11,5 +11,6 @@ router.register(r'loans', views.LoanViewSet)
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+    path('api/members/top-active/', views.ToActiveMembersView.as_view()),
     path('api/', include(router.urls)),
 ]

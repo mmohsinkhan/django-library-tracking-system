@@ -1,18 +1,28 @@
-from rest_framework import viewsets, status
+from datetime import timedelta
+from django.db.models import Count, Q
+from rest_framework import viewsets, generics, status
 from rest_framework.response import Response
 from .models import Author, Book, Member, Loan
-from .serializers import AuthorSerializer, BookSerializer, MemberSerializer, LoanSerializer
+from .serializers import AuthorSerializer, BookSerializer, MemberSerializer, LoanSerializer, ExtendDueDateSerializer
 from rest_framework.decorators import action
+from rest_framework.pagination import PageNumberPagination
 from django.utils import timezone
 from .tasks import send_loan_notification
+
+
+class CustomPagination(PageNumberPagination):
+    page_size_query_param = 'page_size'
+    max_page_size = 1000
+
 
 class AuthorViewSet(viewsets.ModelViewSet):
     queryset = Author.objects.all()
     serializer_class = AuthorSerializer
 
 class BookViewSet(viewsets.ModelViewSet):
-    queryset = Book.objects.all()
+    queryset = Book.objects.all().select_related('author')
     serializer_class = BookSerializer
+    pagination_class = CustomPagination
 
     @action(detail=True, methods=['post'])
     def loan(self, request, pk=None):
@@ -50,5 +60,37 @@ class MemberViewSet(viewsets.ModelViewSet):
     serializer_class = MemberSerializer
 
 class LoanViewSet(viewsets.ModelViewSet):
-    queryset = Loan.objects.all()
+    queryset = Loan.objects.all().select_related('book', 'member', 'member__user')
     serializer_class = LoanSerializer
+
+    @action(detail=True, methods=['post'])
+    def extend_due_date(self, request, pk=None):
+        loan = self.get_object()
+        if loan.due_date < timezone.now().date():
+            return Response({'error': 'Due date has already passed.'}, status=status.HTTP_400_BAD_REQUEST)
+        serializer = ExtendDueDateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        additional_days = serializer.validated_data['additional_days']
+        loan.due_date = loan.due_date + timedelta(days=additional_days)
+        loan.save()
+        return Response(LoanSerializer(loan).data)
+  
+
+class ToActiveMembersView(generics.GenericAPIView):
+    queryset = Member.objects.all().select_related('user')
+    def get(self, request, *args, **kwargs):
+        top_members = Member.objects.all().annotate(
+            active_loans=Count('loans', filter=Q(loans__is_returned=False))
+        ).order_by('-active_loans').select_related('user')[:5]
+        for item in top_members:
+            print(item)
+        # Did not use serializer due to time constraint
+        data = []
+        for item in top_members:
+            data.append({
+                'id': item.id,
+                'username': item.user.username,
+                'email': item.user.email,
+                'active_loans': item.active_loans,
+            })
+        return Response(data)
